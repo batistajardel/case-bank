@@ -1,5 +1,3 @@
--- Active: 1692300127744@@127.0.0.1@5432@transactions@public
--- Criando tabela de associados agregada
 
 CREATE TABLE Associado_Info AS 
 WITH AssociadoTransacoes AS (
@@ -14,14 +12,14 @@ WITH AssociadoTransacoes AS (
 AssociadoCredito AS (
     SELECT DISTINCT associado_id
     FROM Transacoes
-    WHERE nom_modalidade = 'CREDITO'
+    WHERE nom_modalidade = 'Credito'
       AND dat_transacao >= CURRENT_DATE - INTERVAL '3 months'
 ),
 
 AssociadoDebito AS (
     SELECT DISTINCT associado_id
     FROM Transacoes
-    WHERE nom_modalidade = 'DEBITO'
+    WHERE nom_modalidade = 'Debito'
       AND dat_transacao >= CURRENT_DATE - INTERVAL '3 months'
 )
 SELECT

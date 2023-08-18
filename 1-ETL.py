@@ -1,8 +1,17 @@
+import re
 import csv
+import chardet
+import unidecode
+import unicodedata
 import psycopg2.extras
 from datetime import datetime
 
-# Dados de conexão com o banco de dados do PostgreSQL
+
+
+####################################################################################################
+# Connection step
+####################################################################################################
+
 db_params = {
     "host": "127.0.0.1",
     "database": "transactions",
@@ -16,6 +25,16 @@ csv_files = {
     "associado": "db_pessoa.associado.csv",
     "agencia": "db_entidade.agencia.csv"
 }
+
+def detect_encoding(file_path):
+    with open(file_path, 'rb') as f:
+        result = chardet.detect(f.read())
+    return result['encoding']
+
+
+####################################################################################################
+# Data Model
+####################################################################################################
 
 '''
 Utilizamos para a nossa solução a modelagem dimensional dos dados, este processo nos
@@ -41,7 +60,7 @@ pela combinação do código da cooperativa e do código da agência.
 """
 create_agencia_table = """
     CREATE TABLE IF NOT EXISTS Agencia (
-        agencia_id VARCHAR(20) PRIMARY KEY,
+        agencia_id VARCHAR(15) PRIMARY KEY,
         cod_cooperativa VARCHAR(10),
         cod_agencia VARCHAR(10),
         des_nome_cooperativa VARCHAR(255),
@@ -72,7 +91,13 @@ def create_tables(connection, cursor):
     connection.commit()
 
 
-# Aqui definimos as regras de sanitização, e onde serão aplicadas
+####################################################################################################
+# Data Sanitization
+####################################################################################################
+
+'''
+Aqui definimos a config de todas as regras e atributos em que serão aplicadas
+'''
 sanitization_rules = {
     "agencia": {
         "cod_cooperativa": ["zfill"],
@@ -80,24 +105,50 @@ sanitization_rules = {
     },
     "associado": {
         "des_nome_associado": ["uppercase"]
+    },
+    "transacoes": {
+        "cod_cooperativa": ["zfill"],
+        "nom_modalidade": ["decode","remove_accents"]
     }
 }
+
+'''
+Aqui são escritas as logicas de sanitização dos dados
+'''
+
+def remove_accents(data):
+
+    nfkd = unicodedata.normalize('NFKD', data)
+    field_data = u"".join([c for c in nfkd if not unicodedata.combining(c)])
+
+    # Usa expressão regular para retornar a palavra apenas com números, letras e espaço
+    return re.sub('[^a-zA-Z0-9 \\\]', '', field_data)
 
 def sanitize_data(data, rules, column):
     sanitized_data = data
     for rule in rules:
         if rule == "zfill":
-            sanitized_data = sanitized_data.zfill(4)
+            sanitized_data = sanitized_data.rjust(4, '0')
         elif rule == "uppercase":
             sanitized_data = sanitized_data.upper()
+        elif rule == "decode":
+            sanitized_data = sanitized_data.encode('latin1').decode('utf-8').title()
+        elif rule == "remove_accents":
+            sanitized_data = remove_accents(sanitized_data)
     return sanitized_data
+
+
+####################################################################################################
+# ETL Step
+####################################################################################################
 
 # Função para realizar o processo de ETL para a tabela Associado
 def etl_associado(connection, cursor, csv_file):
     table_name = 'associado'
     print("Processing Associado...")
+    csv_encoding = detect_encoding(csv_file)
 
-    with open(csv_file, "r", encoding="ISO-8859-1") as file:
+    with open(csv_file, "r", encoding=csv_encoding) as file:
         csv_reader = csv.DictReader(file, delimiter=';')
         
         insert_query = "INSERT INTO Associado (num_cpf_cnpj, des_nome_associado, dat_associacao, cod_faixa_renda, des_faixa_renda) VALUES %s;"
@@ -129,7 +180,9 @@ def etl_associado(connection, cursor, csv_file):
 def etl_agencia(connection, cursor, csv_file):
     table_name = 'agencia'
     print("Processing Agencia...")
-    with open(csv_file, "r", encoding="ISO-8859-1") as file:
+    csv_encoding = detect_encoding(csv_file)
+
+    with open(csv_file, "r", encoding=csv_encoding) as file:
         csv_reader = csv.DictReader(file, delimiter=';')
         
         insert_query = """
@@ -140,20 +193,18 @@ def etl_agencia(connection, cursor, csv_file):
         
         values = []
         for row in csv_reader:
+            
+            # Aplicar regras de sanitização se a tabela estiver no dicionário
+            if table_name in sanitization_rules:
+                rules = sanitization_rules[table_name]
+                for column, rules_list in rules.items():
+                    row[column] = sanitize_data(row[column], rules_list, column)
+            
             cooperativa_id = row["cod_cooperativa"]
-            agencia_id = f"{cooperativa_id}-{row['cod_agencia']}"
+            agencia_id = f"{cooperativa_id}-{row['cod_agencia']}"  # Geramos uma chave composta para atender as regras de negocio
+
             values.append((agencia_id, cooperativa_id, row["cod_agencia"], row["des_nome_cooperativa"], row["des_nome_agencia"]))
         
-        # Aplicar regras de sanitização se a tabela estiver no dicionário
-        if table_name in sanitization_rules:
-            rules = sanitization_rules[table_name]
-            for index, row in enumerate(values):
-                for column, rules_list in rules.items():
-                    row_list = list(row)  # Convertendo a tupla em lista para editar os valores
-                    column_index = csv_reader.fieldnames.index(column)
-                    row_list[column_index] = sanitize_data(row_list[column_index], rules_list, column)
-                    values[index] = tuple(row_list)  # Convertendo de volta para tupla
-            
         psycopg2.extras.execute_values(cursor, insert_query, values)
         connection.commit()
     
@@ -163,26 +214,30 @@ def etl_agencia(connection, cursor, csv_file):
 def etl_transacoes(connection, cursor, csv_file):
     table_name = 'transacoes'
     print("Processing Transacoes...")
+
     with open(csv_file, "r", encoding="ISO-8859-1") as file:
         csv_reader = csv.DictReader(file, delimiter=';')
         
         insert_query = "INSERT INTO Transacoes (num_plastico, dat_transacao, vlr_transacao, nom_modalidade, nom_cidade_estabelecimento, associado_id, agencia_id) VALUES %s;"
         for row in csv_reader:
-            new_row = {
-                "num_plastico": row["num_plastico"],
-                "dat_transacao": datetime.strptime(row["dat_transacao"], "%d/%m/%Y %H:%M:%S").strftime("%Y-%m-%d %H:%M:%S"),
-                "vlr_transacao": row["vlr_transacao"].replace(',', '.'),
-                "nom_modalidade": row["nom_modalidade"].encode('latin1').decode('utf-8'),
-                "nom_cidade_estabelecimento": row["nom_cidade_estabelecimento"],
-                "associado_id": row["num_cpf_cnpj"],
-                "agencia_id": row["cod_agencia"]
-            }
-
+            
             # Aplicar regras de sanitização se a tabela estiver no dicionário
             if table_name in sanitization_rules:
                 rules = sanitization_rules[table_name]
                 for column, rules_list in rules.items():
-                    new_row[column] = sanitize_data(new_row[column], rules_list, column)
+                    row[column] = sanitize_data(row[column], rules_list, column)
+
+            agencia_id = f"{row['cod_cooperativa']}-{row['cod_agencia']}"  # Formato agencia_id
+            
+            new_row = {
+                "num_plastico": row["num_plastico"],
+                "dat_transacao": datetime.strptime(row["dat_transacao"], "%d/%m/%Y %H:%M:%S").strftime("%Y-%m-%d %H:%M:%S"),
+                "vlr_transacao": row["vlr_transacao"].replace(',', '.'),
+                "nom_modalidade": row["nom_modalidade"],
+                "nom_cidade_estabelecimento": row["nom_cidade_estabelecimento"],
+                "associado_id": row["num_cpf_cnpj"],
+                "agencia_id": agencia_id
+            }
 
             values = tuple(new_row.values())
             psycopg2.extras.execute_values(cursor, insert_query, [values])
@@ -204,7 +259,7 @@ def main():
         #etl_agencia(connection, cursor, csv_files["agencia"])
         etl_transacoes(connection, cursor, csv_files["transacoes"])
 
-        print("SUCESSOOOOOO")
+        print("-----> FINISHED")
 
     except psycopg2.Error as e:
         print("Erro ao interagir com o banco de dados:", e)
