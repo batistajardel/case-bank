@@ -255,8 +255,8 @@ def main():
         create_tables(connection, cursor)
 
         # Realizando o ETL para cada tabela
-        #etl_associado(connection, cursor, csv_files["associado"])
-        #etl_agencia(connection, cursor, csv_files["agencia"])
+        etl_associado(connection, cursor, csv_files["associado"])
+        etl_agencia(connection, cursor, csv_files["agencia"])
         etl_transacoes(connection, cursor, csv_files["transacoes"])
 
         print("-----> FINISHED")
